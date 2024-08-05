@@ -1,0 +1,3 @@
+#!/command/execlineb -P
+cd /root/dnsmap
+/root/dnsmap/proxy.py -a 127.0.0.4 --iprange 10.224.0.0/15

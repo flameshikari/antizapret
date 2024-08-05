@@ -1,0 +1,3 @@
+#!/command/execlineb -P
+
+/usr/sbin/kres-cache-gc -c /var/cache/knot-resolver -d 1000

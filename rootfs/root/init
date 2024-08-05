@@ -1,0 +1,33 @@
+#! /usr/bin/env bash
+
+HOSTNAME=antizapret
+DNS_ADDR=1.1.1.1
+EASYRSA_VERSION=3.2.0
+EASYRSA_PATH=/root/easy-rsa-ipsec/easyrsa3
+EASYRSA_URL=https://github.com/OpenVPN/easy-rsa/releases/download/v$EASYRSA_VERSION/EasyRSA-$EASYRSA_VERSION.tgz
+
+echo "nameserver $DNS_ADDR" > /etc/resolv.conf
+echo "127.0.1.1 $HOSTNAME" >> /etc/hosts
+
+mount -a
+
+sysctl -p /etc/sysctl.conf
+hostname -b $HOSTNAME
+
+if [[ ! -f /etc/openvpn/server/keys/dh2048.pem ]]; then
+    cp -v /root/dh2048.pem /etc/openvpn/server/keys
+fi
+
+if [[ ! -f $EASYRSA_PATH/easyrsa ]]; then
+    curl -s -L $EASYRSA_URL | tar -zxv --strip-components=1 -C $EASYRSA_PATH
+fi
+
+/root/easy-rsa-ipsec/generate.sh
+
+/root/$HOSTNAME/update.sh
+/root/$HOSTNAME/parse.sh
+
+ferm -nl /etc/ferm/ferm.conf | iptables-restore
+/root/$HOSTNAME/process.sh
+
+exec /init

@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  antizapret:
+    image: flameshikari/antizapret
+    container_name: antizapret
+    privileged: true
+    restart: unless-stopped
+    build: .
+    volumes:
+      - ./data/easyrsa/:/root/easy-rsa-ipsec/easyrsa3/
+      - ./data/keys/client:/root/easy-rsa-ipsec/CLIENT_KEY/
+      - ./data/keys/server:/etc/openvpn/server/keys/
+      - ./data/result/:/root/antizapret/result/
+      - ./data/exclude-hosts.txt:/root/antizapret/config/exclude-hosts-custom.txt
+      - ./data/exclude-ips.txt:/root/antizapret/config/exclude-ips-custom.txt
+      - ./data/include-hosts.txt:/root/antizapret/config/include-hosts-custom.txt
+      - ./data/include-ips.txt:/root/antizapret/config/include-ips-custom.txt
+    ports:
+      - 1194:1194/udp
+      - 1194:1194/tcp

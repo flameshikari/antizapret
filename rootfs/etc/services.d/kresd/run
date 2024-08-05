@@ -1,0 +1,4 @@
+#!/command/execlineb -P
+
+cd /var/lib/knot-resolver
+/usr/sbin/kresd -c /etc/knot-resolver/kresd.conf -n

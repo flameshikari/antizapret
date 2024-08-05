@@ -1,0 +1,4 @@
+#!/command/execlineb -P
+
+cd /etc/openvpn/server
+/usr/sbin/openvpn --status /run/openvpn-server/status-antizapret.log --status-version 2 --suppress-timestamps --config antizapret.conf
