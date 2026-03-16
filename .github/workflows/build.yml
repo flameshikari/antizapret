@@ -1,33 +1,208 @@
 name: Build
 
 on:
-  push:
-    branches:
-      - master
-      - dev
-    paths:
-      - .github
-      - ../../adguard
-      - Dockerfile
+  workflow_dispatch:
+    inputs:
+      services:
+        description: Services
+      version:
+        description: Version
+        default: 0.0.0
+        required: true
+      push:
+        description: Push
+        type: boolean
+        default: false
 
 concurrency:
   group: antizapret
 
+env:
+  DOCKER_BUILD_CHECKS_ANNOTATIONS: false
+  DOCKER_BUILD_SUMMARY: false
+  DOCKER_BUILD_RECORD_UPLOAD: false
+  DOCKER_HUB_USER: flameshikari
+  GITHUB_USER: flameshikari
+  PREFIX: flameshikari/antizapret-vpn
+
 jobs:
+  matrix:
+    name: Matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      services: ${{ steps.matrix.outputs.services }}
+      version_major: ${{ steps.version.outputs.major }}
+      version_minor: ${{ steps.version.outputs.minor }}
+      version_patch: ${{ steps.version.outputs.patch }}
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v6
+
+    - name: Parse Version
+      id: version
+      uses: release-kit/semver@v2
+      with:
+        string: ${{ inputs.version }}
+
+    - name: Generate Matrix
+      id: matrix
+      run: |
+        python - << EOF
+        import json, re, os
+        prefix = 'antizapret-vpn'
+        output = {'include': []}
+        input = '${{ github.event.inputs.services }}'.strip()
+        services = sorted([x for x in re.split(r'[,\s]+', input) if x] \
+          if input else [x.name for x in os.scandir('./services') if x.is_dir()])
+        for service in services:
+          match service:
+            case 'antizapret': name = prefix
+            case _: name = f'{prefix}-{service}'
+          for arch in ['amd64', 'arm64']:
+            output['include'].append({
+              'service': service,
+              'name': name,
+              'arch': arch,
+            })
+        matrix = json.dumps(output).replace('"', '\\"')
+        services = ' '.join(services)
+        with open(os.environ.get('GITHUB_OUTPUT'), 'a') as output:
+          output.write(f'matrix={matrix}\n')
+          output.write(f"services={services}")
+        EOF
+        cat $GITHUB_OUTPUT
+
   build:
-    name: Build
-    runs-on: ubuntu-latest
+    name: ${{ matrix.service }} – ${{ matrix.arch }}
+    runs-on: ${{ contains(matrix.arch, 'arm') && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    needs: matrix
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
-      - name: Build Image
-        uses: docker/build-push-action@v6
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        if: inputs.push == true
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          username: ${{ env.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      - name: Login to GitHub CR
+        uses: docker/login-action@v4
+        if: inputs.push == true
+        with:
+          registry: ghcr.io
+          username: ${{ env.GITHUB_USER }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        uses: docker/bake-action@v7
+        id: bake
+        with:
+          source: ./services/${{ matrix.service }}
+          targets: ${{ matrix.service }}
+          set: |
+            *.cache-from=type=registry,ref=${{ env.DOCKER_HUB_USER }}/${{ matrix.name }}:${{ needs.matrix.outputs.version_major }}
+            *.cache-from=type=registry,ref=ghcr.io/${{ env.GITHUB_USER }}/${{ matrix.name }}:${{ needs.matrix.outputs.version_major }}
+            *.cache-from=type=gha,scope=build-${{ matrix.service }}-${{ matrix.arch }}
+            *.cache-to=type=gha,mode=max,scope=build-${{ matrix.service }}-${{ matrix.arch }}
+            *.output=type=image,push-by-digest=true,name-canonical=true,push=${{ inputs.push }}
+            *.tags=${{ env.DOCKER_HUB_USER }}/${{ matrix.name }}
+            *.tags=ghcr.io/${{ env.GITHUB_USER }}/${{ matrix.name }}
+
+      - name: Export Digest
+        if: inputs.push == true
+        run: |
+          mkdir -p ${{ runner.temp }}/digest/${{ matrix.service }}/${{ matrix.arch }}
+          digest="${{ fromJSON(steps.bake.outputs.metadata)[matrix.service]['containerimage.digest'] }}"
+          touch "${{ runner.temp }}/digest/${{ matrix.service }}/${{ matrix.arch }}/${digest#sha256:}"
+
+      - name: Upload Digest
+        uses: actions/upload-artifact@v7
+        if: inputs.push == true
+        with:
+          name: digest-${{ matrix.service }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digest/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish
+    runs-on: ubuntu-24.04
+    needs:
+      - matrix
+      - build
+    permissions:
+      contents: read
+      packages: write
+    if: inputs.push == true
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Download Digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      - name: Login to GitHub CR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ env.GITHUB_USER }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Manifests
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          MAJOR=${{ needs.matrix.outputs.version_major }}
+          MINOR=${{ needs.matrix.outputs.version_minor }}
+          PATCH=${{ needs.matrix.outputs.version_patch }}
+          for service in ${{ needs.matrix.outputs.services }}; do
+            ARGS=()
+            TAGS=(
+              "${{ env.PREFIX }}-${service}"
+              "ghcr.io/${{ env.PREFIX }}-${service}"
+            )
+            for tag in "${TAGS[@]}"; do
+              ARGS+=(
+                --tag ${tag}:latest
+                --tag ${tag}:${MAJOR}
+                --tag ${tag}:${MAJOR}.${MINOR}
+                --tag ${tag}:${MAJOR}.${MINOR}.${PATCH}
+              )
+              for arch in $(ls ${service}); do
+                digest=$(ls "${service}/${arch}")
+                ARGS+=("${tag}@sha256:${digest}")
+              done
+            done
+            docker buildx imagetools create "${ARGS[@]}"
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ inputs.version }}
+          tag_name: v${{ inputs.version }}
+          token: ${{ secrets.GH_PAT }}
+          draft: true
